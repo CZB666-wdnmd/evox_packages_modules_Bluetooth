@@ -32,6 +32,10 @@
 #include "a2dp_vendor_aptx_hd.h"
 #include "a2dp_vendor_ldac.h"
 #include "a2dp_vendor_opus.h"
+#include "a2dp_vendor_lhdcv2.h"
+#include "a2dp_vendor_lhdcv3.h"
+#include "a2dp_vendor_lhdcv3_dec.h"
+#include "a2dp_vendor_lhdcv5.h"
 #endif
 
 #if !defined(UNIT_TESTS)
@@ -146,6 +150,23 @@ A2dpCodecConfig* A2dpCodecConfig::createCodec(
     case BTAV_A2DP_CODEC_INDEX_SINK_OPUS:
       codec_config = new A2dpCodecConfigOpusSink(codec_priority);
       break;
+    // Savitech LHDC - START
+    case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV2:
+      codec_config = new A2dpCodecConfigLhdcV2(codec_priority);
+      break;
+    case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV3:
+      codec_config = new A2dpCodecConfigLhdcV3(codec_priority);
+      break;
+    case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV5:
+      codec_config = new A2dpCodecConfigLhdcV5Source(codec_priority);
+      break;
+    case BTAV_A2DP_CODEC_INDEX_SINK_LHDCV3:
+      codec_config = new A2dpCodecConfigLhdcV3Sink(codec_priority);
+      break;
+    case BTAV_A2DP_CODEC_INDEX_SINK_LHDCV5:
+      codec_config = new A2dpCodecConfigLhdcV5Sink(codec_priority);
+      break;
+    // Savitech LHDC - END
 #endif
     case BTAV_A2DP_CODEC_INDEX_MAX:
     default:
@@ -382,9 +403,12 @@ bool A2dpCodecConfig::setCodecUserConfig(
   //
   btav_a2dp_codec_config_t new_codec_config = getCodecConfig();
   if ((saved_codec_config.sample_rate != new_codec_config.sample_rate) ||
-      (saved_codec_config.bits_per_sample !=
-       new_codec_config.bits_per_sample) ||
-      (saved_codec_config.channel_mode != new_codec_config.channel_mode)) {
+      (saved_codec_config.bits_per_sample != new_codec_config.bits_per_sample) ||
+      (saved_codec_config.channel_mode != new_codec_config.channel_mode) ||
+      (saved_codec_config.codec_specific_1 != new_codec_config.codec_specific_1) || // Savitech LHDC
+      (saved_codec_config.codec_specific_2 != new_codec_config.codec_specific_2) ||
+      (saved_codec_config.codec_specific_3 != new_codec_config.codec_specific_3) ||
+      (saved_codec_config.codec_specific_4 != new_codec_config.codec_specific_4)) {
     *p_restart_input = true;
   }
 
@@ -735,6 +759,288 @@ bool A2dpCodecs::setSinkCodecConfig(const uint8_t* p_peer_codec_info,
   }
   return true;
 }
+
+/***********************************************
+ * Savitech LHDC_EXT_API -- START
+ ***********************************************/
+static bool swapInt64toByteArray(unsigned char *byteArray, int64_t integer64)
+{
+  bool ret = false;
+  if (!byteArray) {
+    APPL_TRACE_ERROR("%s: null ptr", __func__);
+    return ret;
+  }
+
+  byteArray[7] = ((integer64 & 0x00000000000000FF) >> 0);
+  byteArray[6] = ((integer64 & 0x000000000000FF00) >> 8);
+  byteArray[5] = ((integer64 & 0x0000000000FF0000) >> 16);
+  byteArray[4] = ((integer64 & 0x00000000FF000000) >> 24);
+  byteArray[3] = ((integer64 & 0x000000FF00000000) >> 32);
+  byteArray[2] = ((integer64 & 0x0000FF0000000000) >> 40);
+  byteArray[1] = ((integer64 & 0x00FF000000000000) >> 48);
+  byteArray[0] = ((integer64 & 0xFF00000000000000) >> 56);
+
+  ret = true;
+  return ret;
+}
+
+static bool getLHDCA2DPSpecficV2(btav_a2dp_codec_config_t *a2dpCfg, unsigned char *pucConfig, const int clen)
+{
+  if (clen < (int)LHDC_EXTEND_FUNC_CONFIG_TOTAL_FIXED_SIZE_V2 ) {
+    APPL_TRACE_ERROR("%s: payload size too small! clen=%d ",__func__, clen);
+    return false;
+  }
+
+  /* copy specifics into buffer */
+  if ( !(
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS1_HEAD_V2], a2dpCfg->codec_specific_1) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS2_HEAD_V2], a2dpCfg->codec_specific_2) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS3_HEAD_V2], a2dpCfg->codec_specific_3) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS4_HEAD_V2], a2dpCfg->codec_specific_4)
+      )) {
+    APPL_TRACE_ERROR("%s: fail to copy specifics to buffer!",  __func__);
+    return false;
+  }
+
+  /* fill capability metadata fields */
+  if( A2DP_VendorGetSrcCapVectorLhdcv3(&pucConfig[LHDC_EXTEND_FUNC_A2DP_CAPMETA_HEAD_V2]) ) {
+    APPL_TRACE_DEBUG("%s: Get metadata of capabilities success!", __func__);
+  } else {
+    APPL_TRACE_ERROR("%s: fail to get capability fields!",  __func__);
+    return false;
+  }
+
+  return true;
+}
+
+static bool getLHDCA2DPSpecficV1(btav_a2dp_codec_config_t *a2dpCfg, unsigned char *pucConfig, const int clen)
+{
+  if (clen < (int)LHDC_EXTEND_FUNC_CONFIG_TOTAL_FIXED_SIZE_V1 ) {
+    APPL_TRACE_ERROR("%s: payload size too small! clen=%d ",__func__, clen);
+    return false;
+  }
+
+  /* copy specifics into buffer */
+  if( !(
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS1_HEAD_V1], a2dpCfg->codec_specific_1) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS2_HEAD_V1], a2dpCfg->codec_specific_2) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS3_HEAD_V1], a2dpCfg->codec_specific_3) &&
+      swapInt64toByteArray(&pucConfig[LHDC_EXTEND_FUNC_A2DP_SPECIFICS4_HEAD_V1], a2dpCfg->codec_specific_4)
+      )) {
+    APPL_TRACE_ERROR("%s: fail to copy specifics to buffer!",  __func__);
+    return false;
+  }
+
+  return true;
+}
+
+int A2dpCodecs::getLHDCCodecUserConfig(
+    A2dpCodecConfig* peerCodec,
+    const char* codecConfig, const int clen) {
+
+  int result = BT_STATUS_FAIL;
+
+  if (peerCodec == nullptr || codecConfig == nullptr) {
+    APPL_TRACE_ERROR("A2dpCodecs::%s: null input(peerCodec:%p codecConfig:%p)", __func__, peerCodec, codecConfig);
+    return BT_STATUS_FAIL;
+  }
+  btav_a2dp_codec_index_t peerCodecIndex = peerCodec->codecIndex();
+
+  switch(peerCodecIndex)
+  {
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV5:
+    result = peerCodec->getLhdcExtendAPIConfig(peerCodec, codecConfig, clen);
+    break;
+
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV3:
+    if (codecConfig[LHDC_EXTEND_FUNC_CONFIG_API_CODE_HEAD] == LHDC_EXTEND_FUNC_CODE_A2DP_TYPE_MASK) {
+      /* **************************************
+       * LHDC A2DP related APIs:
+       * **************************************/
+      unsigned char *pucConfig = (unsigned char *) codecConfig;
+      unsigned int exFuncVer = 0;
+      unsigned int exFuncCode = 0;
+
+      if (pucConfig == NULL) {
+          APPL_TRACE_ERROR("%s: User Config error!(%p)",  __func__, codecConfig);
+          goto Fail;
+      }
+
+      /* check required buffer size for generic header */
+      if (clen < (int)(LHDC_EXTEND_FUNC_CONFIG_API_VERSION_SIZE + LHDC_EXTEND_FUNC_CONFIG_API_CODE_SIZE)) {
+           // Buffer is too small for generic header size
+          APPL_TRACE_ERROR("%s: buffer is too small for command clen=%d",  __func__, clen);
+          goto Fail;
+      }
+
+      if (current_codec_config_ == NULL) {
+          APPL_TRACE_ERROR("%s: Can not get current a2dp codec config!",  __func__);
+          goto Fail;
+      }
+
+      A2dpCodecConfig *a2dp_codec_config = current_codec_config_;
+      btav_a2dp_codec_config_t codec_config_tmp;
+
+      exFuncVer = (((unsigned int) pucConfig[3]) & ((unsigned int)0xff)) |
+                 ((((unsigned int) pucConfig[2]) & ((unsigned int)0xff)) << 8)  |
+                 ((((unsigned int) pucConfig[1]) & ((unsigned int)0xff)) << 16) |
+                 ((((unsigned int) pucConfig[0]) & ((unsigned int)0xff)) << 24);
+      exFuncCode = (((unsigned int) pucConfig[7]) & ((unsigned int)0xff)) |
+                  ((((unsigned int) pucConfig[6]) & ((unsigned int)0xff)) << 8)  |
+                  ((((unsigned int) pucConfig[5]) & ((unsigned int)0xff)) << 16) |
+                  ((((unsigned int) pucConfig[4]) & ((unsigned int)0xff)) << 24);
+
+      switch (exFuncCode)
+      {
+        case EXTEND_FUNC_CODE_GET_SPECIFIC:
+          /* **************************************
+           * API::Get A2DP Specifics
+           * **************************************/
+          switch(pucConfig[LHDC_EXTEND_FUNC_CONFIG_A2DPCFG_CODE_HEAD])
+          {
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_FINAL_CFG:
+              codec_config_tmp = a2dp_codec_config->getCodecConfig();
+              break;
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_FINAL_CAP:
+              codec_config_tmp = a2dp_codec_config->getCodecCapability();
+              break;
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_LOCAL_CAP:
+              codec_config_tmp = a2dp_codec_config->getCodecLocalCapability();
+              break;
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_SELECTABLE_CAP:
+              codec_config_tmp = a2dp_codec_config->getCodecSelectableCapability();
+              break;
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_USER_CFG:
+              codec_config_tmp = a2dp_codec_config->getCodecUserConfig();
+              break;
+            case LHDC_EXTEND_FUNC_A2DP_TYPE_SPECIFICS_AUDIO_CFG:
+              codec_config_tmp = a2dp_codec_config->getCodecAudioConfig();
+              break;
+            default:
+              APPL_TRACE_ERROR("%s: target a2dp config not found!",  __func__);
+              goto Fail;
+          }
+
+          switch (exFuncVer)
+          {
+            case EXTEND_FUNC_VER_GET_SPECIFIC_V1:
+              if (!getLHDCA2DPSpecficV1(&codec_config_tmp, pucConfig, clen))
+                goto Fail;
+              break;
+            case EXTEND_FUNC_VER_GET_SPECIFIC_V2:
+              if (!getLHDCA2DPSpecficV2(&codec_config_tmp, pucConfig, clen))
+                goto Fail;
+              break;
+            default:
+              APPL_TRACE_DEBUG("%s: Invalid Ex. Function Version!(0x%X)",  __func__, exFuncVer);
+              goto Fail;
+          }
+          result = BT_STATUS_SUCCESS;
+          break;
+
+      default:
+        APPL_TRACE_DEBUG("%s: Invalid Ex. Function Code!(0x%X)",  __func__, exFuncCode);
+        goto Fail;
+      } // switch (exFuncCode)
+    } else if ( codecConfig[LHDC_EXTEND_FUNC_CONFIG_API_CODE_HEAD] == LHDC_EXTEND_FUNC_CODE_LIB_TYPE_MASK ) {
+      result = A2dpCodecConfigLhdcV3::getEncoderExtendFuncUserConfig(codecConfig, clen);
+    }
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV2:
+  default:
+    APPL_TRACE_DEBUG("%s: feature not support!", __func__);
+    goto Fail;
+  }
+
+Fail:
+  return result;
+}
+
+int A2dpCodecs::setLHDCCodecUserConfig(
+    A2dpCodecConfig* peerCodec,
+    const char* codecConfig, const int clen) {
+
+  int result = BT_STATUS_FAIL;
+
+  if (peerCodec == nullptr || codecConfig == nullptr) {
+    APPL_TRACE_ERROR("A2dpCodecs::%s: null input(peerCodec:%p version:%p)", __func__, peerCodec, codecConfig);
+    return BT_STATUS_FAIL;
+  }
+  btav_a2dp_codec_index_t peerCodecIndex = peerCodec->codecIndex();
+
+  switch(peerCodecIndex)
+  {
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV5:
+    result = peerCodec->setLhdcExtendAPIConfig(peerCodec, codecConfig, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV3:
+    result = A2dpCodecConfigLhdcV3::setEncoderExtendFuncUserConfig(codecConfig, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV2:
+  default:
+    APPL_TRACE_DEBUG("%s: peer codecIndex(%d) not support the feature!", __func__, peerCodecIndex);
+    return result;
+  }
+
+  return result;
+}
+
+bool A2dpCodecs::setLHDCCodecUserData(
+    A2dpCodecConfig* peerCodec,
+    const char* codecData, const int clen) {
+
+  if (peerCodec == nullptr || codecData == nullptr) {
+    APPL_TRACE_ERROR("A2dpCodecs::%s: null input(peerCodec:%p version:%p)", __func__, peerCodec, codecData);
+    return false;
+  }
+  btav_a2dp_codec_index_t peerCodecIndex = peerCodec->codecIndex();
+
+  switch(peerCodecIndex)
+  {
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV5:
+    peerCodec->setLhdcExtendAPIData(peerCodec, codecData, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV3:
+    A2dpCodecConfigLhdcV3::setEncoderExtendFuncUserData(codecData, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV2:
+  default:
+    APPL_TRACE_DEBUG("%s: peer codecIndex(%d) not support the feature!", __func__, peerCodecIndex);
+    return false;
+  }
+
+  return true;
+}
+
+int A2dpCodecs::getLHDCCodecUserApiVer(
+    A2dpCodecConfig* peerCodec,
+    const char* version, const int clen) {
+  int result = BT_STATUS_FAIL;
+
+  if (peerCodec == nullptr || version == nullptr) {
+    APPL_TRACE_ERROR("A2dpCodecs::%s: null input(peerCodec:%p version:%p)", __func__, peerCodec, version);
+    return BT_STATUS_FAIL;
+  }
+  btav_a2dp_codec_index_t peerCodecIndex = peerCodec->codecIndex();
+
+  switch(peerCodecIndex) {
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV5:
+    result = peerCodec->getLhdcExtendAPIVersion(peerCodec, version, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV3:
+    result = A2dpCodecConfigLhdcV3::getEncoderExtendFuncUserApiVer(version, clen);
+    break;
+  case BTAV_A2DP_CODEC_INDEX_SOURCE_LHDCV2:
+  default:
+    APPL_TRACE_DEBUG("%s: peer codecIndex(%d) not support the feature!", __func__, peerCodecIndex);
+    return result;
+  }
+
+  return result;
+}
+/***********************************************
+ * Savitech LHDC_EXT_API -- END
+ ***********************************************/
 
 bool A2dpCodecs::setCodecUserConfig(
     const btav_a2dp_codec_config_t& codec_user_config,

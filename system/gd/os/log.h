@@ -66,6 +66,9 @@ static_assert(LOG_TAG != nullptr, "LOG_TAG should never be NULL");
     if (bluetooth::common::InitFlags::GetLogLevelForTag(LOG_TAG) >= LOG_TAG_VERBOSE) { \
       ALOGV(fmt, ##args);                                                              \
     }                                                                                  \
+    else {                                                                             \
+      ALOGD("DBG: " fmt, ##args);                                                      \
+    }                                                                                  \
   } while (false)
 
 #define LOG_DEBUG_INT(fmt, args...)                                                  \
